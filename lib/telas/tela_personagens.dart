@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -16,6 +17,9 @@ class _TelaPersonagensState extends State<TelaPersonagens> {
   // chave = valor do filtro na URL ('' = sem filtro); valor = texto na tela
   static const filtros = {'': 'Todos', 'alive': 'Vivos', 'dead': 'Mortos'};
 
+  // Respostas já recebidas, para não pedir de novo a mesma página à API
+  final _cache = <String, Map<String, dynamic>>{};
+
   late Future<List<Personagem>> _futuro;
   String filtro = '';
   int pagina = 1;
@@ -31,17 +35,34 @@ class _TelaPersonagensState extends State<TelaPersonagens> {
 
   Future<List<Personagem>> buscarPersonagens() async {
     final status = filtro.isEmpty ? '' : '&status=$filtro';
-    final resposta = await http.get(Uri.parse(
-      'https://rickandmortyapi.com/api/character?page=$pagina$status'));
-    if (resposta.statusCode != 200) {
-      throw Exception('Falha na consulta: ${resposta.statusCode}');
+    final url = 'https://rickandmortyapi.com/api/character?page=$pagina$status';
+    var dados = _cache[url];
+    if (dados == null) {
+      final resposta = await _getComRepeticao(Uri.parse(url));
+      if (resposta.statusCode != 200) {
+        throw Exception('Falha na consulta: ${resposta.statusCode}');
+      }
+      dados = jsonDecode(resposta.body) as Map<String, dynamic>;
+      _cache[url] = dados;
     }
-    final dados = jsonDecode(resposta.body) as Map<String, dynamic>;
     totalPaginas = dados['info']['pages'];
     final lista = dados['results'] as List<dynamic>;
     return lista
         .map((item) => Personagem.fromMap(item as Map<String, dynamic>))
         .toList();
+  }
+
+  // Status 429 = muitas requisições em pouco tempo. Espera e tenta de novo:
+  // o tempo pedido pela API em Retry-After ou, sem ele, 1, 2 e 4 segundos.
+  Future<http.Response> _getComRepeticao(Uri url) async {
+    var resposta = await http.get(url);
+    for (var i = 0; i < 3 && resposta.statusCode == 429; i++) {
+      final pedido = int.tryParse(resposta.headers['retry-after'] ?? '');
+      await Future.delayed(Duration(seconds: min(pedido ?? (1 << i), 8)));
+      if (!mounted) break;
+      resposta = await http.get(url);
+    }
+    return resposta;
   }
 
   Future<void> _carregarFavorito() async {
